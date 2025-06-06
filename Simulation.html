@@ -97,6 +97,7 @@
             color: #555;
         }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
 </head>
 <body>
 
@@ -116,15 +117,15 @@
         <div id="info-display">Current Depth: 0.0 m</div>
         <button id="play-pause-btn">Play</button>
         <label for="depth-slider">Manual Depth Control</label>
-        <input type="range" id="depth-slider" min="0" max="3000" step="1" value="0">
+        <input type="range" id="depth-slider" min="0" max="3000" step="0.1" value="0">
     </div>
 </div>
 
 <script>
     // --- Configuration ---
-    const MAX_DEPTH = 3000;
+    let MAX_DEPTH = 0;
     const LOOKAHEAD_DISTANCE = 500;
-    const MAX_GRAPH_DEPTH = MAX_DEPTH + LOOKAHEAD_DISTANCE; // Graph needs to see further
+    let MAX_GRAPH_DEPTH = 0; // Graph needs to see further
     const DRILL_SPEED = 50;
     const BASE_DENSITY = 2200;
 
@@ -145,27 +146,51 @@
     let isDrilling = false;
     let animationFrameId;
     let particles = [];
+    let depthData = [];
+    let startDepth = 0;
 
-    // --- 1. DATA & MODEL SETUP (Unchanged) ---
-    function generateRockData() {
-        const data = [];
-        for (let depth = 0; depth <= MAX_GRAPH_DEPTH; depth++) { // Generate a little extra data for lookahead
-            const layer1 = 150 * Math.sin(depth / 200);
-            const layer2 = 80 * Math.sin(depth / 75);
-            const layer3 = 40 * Math.cos(depth / 30);
-            data.push(BASE_DENSITY + layer1 + layer2 + layer3);
-        }
-        return data;
+    async function loadRockData() {
+        const response = await fetch('WLC_MUD_LOG_INTERPOLATED.csv');
+        const csvText = await response.text();
+        const parsed = Papa.parse(csvText, {header: true, dynamicTyping: true}).data;
+        startDepth = parseFloat(parsed[0]['Unnamed: 0']) || 0;
+        parsed.forEach(row => {
+            const depth = parseFloat(row['Unnamed: 0']);
+            const gr = parseFloat(row['GR']);
+            if (isFinite(depth) && isFinite(gr)) {
+                depthData.push(depth - startDepth);
+                rockData.push(gr);
+            }
+        });
+        MAX_DEPTH = depthData[depthData.length - 1];
+        MAX_GRAPH_DEPTH = MAX_DEPTH + LOOKAHEAD_DISTANCE;
+        predictedData = depthData.map(d => predictDensity(d));
+        const allDensities = rockData.concat(predictedData);
+        minDensity = Math.min(...allDensities) - 5;
+        maxDensity = Math.max(...allDensities) + 5;
     }
+
     function predictDensity(depth) {
         const currentActualDensity = getActualDensity(depth);
-        const predictionError = (Math.random() - 0.5) * 60;
-        return currentActualDensity + 25 + predictionError;
+        const predictionError = (Math.random() - 0.5) * 5;
+        return currentActualDensity + predictionError;
     }
+
+    function findIndexForDepth(depth) {
+        let low = 0, high = depthData.length - 1;
+        while (low < high) {
+            const mid = Math.floor((low + high) / 2);
+            if (depthData[mid] < depth) low = mid + 1;
+            else high = mid;
+        }
+        return low;
+    }
+
     function getActualDensity(depth) {
-        const index = Math.min(Math.round(depth), MAX_GRAPH_DEPTH);
-        return rockData[index] || BASE_DENSITY;
+        const idx = findIndexForDepth(depth);
+        return rockData[idx] || BASE_DENSITY;
     }
+
 
     // --- 2. DRAWING & VISUALIZATION ---
 
@@ -255,15 +280,15 @@
         graphCtx.fillStyle = '#333';
         graphCtx.fillText('Predicted Density (at predicted depth)', padding + 135, 14);
 
-        const lastIndex = Math.round(currentDepth);
+        const lastIndex = findIndexForDepth(currentDepth);
         if (lastIndex < 1) return;
 
         // Actual Line (drawn up to currentDepth)
         graphCtx.strokeStyle = '#007bff'; graphCtx.lineWidth = 2;
         graphCtx.beginPath();
-        graphCtx.moveTo(mapDepthToX(0), mapDensityToY(rockData[0]));
+        graphCtx.moveTo(mapDepthToX(depthData[0]), mapDensityToY(rockData[0]));
         for (let i = 1; i <= lastIndex; i++) {
-            graphCtx.lineTo(mapDepthToX(i), mapDensityToY(rockData[i]));
+            graphCtx.lineTo(mapDepthToX(depthData[i]), mapDensityToY(rockData[i]));
         }
         graphCtx.stroke();
 
@@ -271,12 +296,11 @@
         graphCtx.strokeStyle = '#28a745'; graphCtx.lineWidth = 2;
         graphCtx.beginPath();
         // The first prediction (made at depth 0) is for depth 50. So we start plotting at x=50.
-        graphCtx.moveTo(mapDepthToX(LOOKAHEAD_DISTANCE), mapDensityToY(predictedData[0]));
+        graphCtx.moveTo(mapDepthToX(depthData[0] + LOOKAHEAD_DISTANCE), mapDensityToY(predictedData[0]));
         // Loop up to the current depth...
         for (let i = 1; i <= lastIndex; i++) {
-            const predictedValue = predictedData[i]; // The value of the prediction made at depth `i`
-            const depthOfPrediction = i + LOOKAHEAD_DISTANCE; // The depth this prediction is FOR
-            // Plot the value at its corresponding future depth on the x-axis
+            const predictedValue = predictedData[i];
+            const depthOfPrediction = depthData[i] + LOOKAHEAD_DISTANCE;
             graphCtx.lineTo(mapDepthToX(depthOfPrediction), mapDensityToY(predictedValue));
         }
         graphCtx.stroke();
@@ -358,15 +382,8 @@
     window.addEventListener('resize', resizeCanvases);
 
     // --- Initialization ---
-    function init() {
-        rockData = generateRockData();
-        // Prediction for depth 'd' is made using data from 'd'
-        predictedData = Array.from({length: MAX_DEPTH + 1}, (_, d) => predictDensity(d));
-
-        const allDensities = rockData.concat(predictedData);
-        minDensity = Math.min(...allDensities) - 50;
-        maxDensity = Math.max(...allDensities) + 50;
-        
+    async function init() {
+        await loadRockData();
         depthSlider.max = MAX_DEPTH;
         resizeCanvases();
         updateUI();
