@@ -124,7 +124,7 @@
 <script>
     // --- Configuration ---
     let MAX_DEPTH = 0;
-    const LOOKAHEAD_DISTANCE = 500;
+    const LOOKAHEAD_DISTANCE = 50;
     let MAX_GRAPH_DEPTH = 0; // Graph needs to see further
     const DRILL_SPEED = 50;
     const BASE_DENSITY = 2200;
@@ -162,18 +162,38 @@
                 rockData.push(gr);
             }
         });
+
+        // Load pre-computed predictions for depth + 50 m
+        const predResp = await fetch('predictions_50m.csv');
+        const predText = await predResp.text();
+        const predParsed = Papa.parse(predText, {header: true, dynamicTyping: true}).data;
+        const predMap = new Map();
+        predParsed.forEach(row => {
+            const d = parseFloat(row['Depth']);
+            const p = parseFloat(row['Predicted_GR']);
+            if (isFinite(d) && isFinite(p)) {
+                predMap.set(d - startDepth, p);
+            }
+        });
+        depthData.forEach(d => {
+            const val = predMap.get(d);
+            predictedData.push(val !== undefined ? val : null);
+        });
+
         MAX_DEPTH = depthData[depthData.length - 1];
         MAX_GRAPH_DEPTH = MAX_DEPTH + LOOKAHEAD_DISTANCE;
-        predictedData = depthData.map(d => predictDensity(d));
-        const allDensities = rockData.concat(predictedData);
+        const allDensities = rockData.concat(predictedData.filter(v => v !== null));
         minDensity = Math.min(...allDensities) - 5;
         maxDensity = Math.max(...allDensities) + 5;
     }
 
     function predictDensity(depth) {
-        const currentActualDensity = getActualDensity(depth);
-        const predictionError = (Math.random() - 0.5) * 5;
-        return currentActualDensity + predictionError;
+        const idx = findIndexForDepth(depth);
+        const pred = predictedData[idx];
+        if (pred === null || pred === undefined) {
+            return getActualDensity(depth);
+        }
+        return pred;
     }
 
     function findIndexForDepth(depth) {
@@ -293,17 +313,20 @@
         graphCtx.stroke();
 
         // --- MODIFIED: Predicted Line plotting logic ---
-        graphCtx.strokeStyle = '#28a745'; graphCtx.lineWidth = 2;
+        graphCtx.strokeStyle = '#28a745';
+        graphCtx.lineWidth = 2;
         graphCtx.beginPath();
-        // The first prediction (made at depth 0) is for depth 50. So we start plotting at x=50.
-        graphCtx.moveTo(mapDepthToX(depthData[0] + LOOKAHEAD_DISTANCE), mapDensityToY(predictedData[0]));
-        // Loop up to the current depth...
-        for (let i = 1; i <= lastIndex; i++) {
+        let started = false;
+        for (let i = 0; i <= lastIndex; i++) {
             const predictedValue = predictedData[i];
+            if (predictedValue == null) continue;
             const depthOfPrediction = depthData[i] + LOOKAHEAD_DISTANCE;
-            graphCtx.lineTo(mapDepthToX(depthOfPrediction), mapDensityToY(predictedValue));
+            const x = mapDepthToX(depthOfPrediction);
+            const y = mapDensityToY(predictedValue);
+            if (!started) { graphCtx.moveTo(x, y); started = true; }
+            else { graphCtx.lineTo(x, y); }
         }
-        graphCtx.stroke();
+        if (started) graphCtx.stroke();
 
         graphCtx.lineWidth = 1;
     }
