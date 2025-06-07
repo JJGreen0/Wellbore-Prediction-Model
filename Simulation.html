@@ -11,7 +11,8 @@
             justify-content: center;
             background-color: #f0f2f5;
             margin: 0;
-            overflow: hidden; /* Prevent scrollbars from layout shifts */
+            /* allow scrolling if controls overflow */
+            overflow: auto;
         }
         #simulation-container {
             display: flex;
@@ -19,11 +20,11 @@
             align-items: center;
             background-color: #ffffff;
             padding: 20px;
-            margin: 10px;
-            border-radius: 8px;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            /* remove extra margin so it fits full viewport */
+            margin: 0;
+            box-sizing: border-box;
             width: 98vw;
-            height: 95vh;
+            height: 100vh;
         }
         h1 {
             margin-top: 0;
@@ -33,9 +34,10 @@
         }
         #main-content {
             display: flex;
+            flex: 1;            /* grow to fill available space */
             width: 100%;
-            height: 100%;
             gap: 20px;
+            box-sizing: border-box;
         }
         #wellbore-container, #graph-container {
             display: flex;
@@ -44,12 +46,13 @@
             border: 1px solid #ccc;
             border-radius: 5px;
             padding: 10px;
+            box-sizing: border-box;
         }
         #wellbore-container {
-            flex: 0 0 320px; /* Fixed width for the wellbore */
+            flex: 0 0 320px;
         }
         #graph-container {
-            flex-grow: 1; /* Graph takes remaining space */
+            flex-grow: 1;
         }
         h2 {
             margin: 0 0 10px 0;
@@ -60,20 +63,20 @@
             border: 2px solid #333;
         }
         #wellboreCanvas {
-            background-color: #e8dcc5; /* Sandstone */
+            background-color: #e8dcc5;
         }
         #graphCanvas {
             background-color: #fdfdfd;
         }
         #controls {
-            margin-top: 15px;
+            margin-top: 10px;
             display: flex;
             flex-direction: column;
             align-items: center;
             gap: 10px;
             width: 100%;
             max-width: 400px;
-            flex-shrink: 0;
+            box-sizing: border-box;
         }
         #depth-slider {
             width: 80%;
@@ -109,7 +112,7 @@
             <canvas id="wellboreCanvas"></canvas>
         </div>
         <div id="graph-container">
-            <h2>Density vs. Depth</h2>
+            <h2 id="graph-title"></h2>
             <canvas id="graphCanvas"></canvas>
         </div>
     </div>
@@ -125,11 +128,15 @@
     // --- Configuration ---
     let MAX_DEPTH = 0;
     const LOOKAHEAD_DISTANCE = 50;
-    let MAX_GRAPH_DEPTH = 0; // Graph needs to see further
+    let MAX_GRAPH_DEPTH = 0;
     const DRILL_SPEED = 50;
     const BASE_DENSITY = 2200;
+    const TARGET = 'GR';               // <-- Change this to any feature name
+    const DEPTHCOL = 'Unnamed: 0';
+    const INPUT = 'WLC_MUD_LOG_INTERPOLATED.csv';
 
     // --- DOM Elements ---
+    const graphTitle = document.getElementById('graph-title');
     const wellboreCanvas = document.getElementById('wellboreCanvas');
     const wellboreCtx = wellboreCanvas.getContext('2d');
     const graphCanvas = document.getElementById('graphCanvas');
@@ -138,10 +145,10 @@
     const depthSlider = document.getElementById('depth-slider');
     const infoDisplay = document.getElementById('info-display');
 
-    // --- Simulation State ---
+    // --- Data Variables ---
     let rockData = [];
     let predictedData = [];
-    let minDensity, maxDensity;
+    let minVal, maxVal;
     let currentDepth = 0;
     let isDrilling = false;
     let animationFrameId;
@@ -149,53 +156,48 @@
     let depthData = [];
     let startDepth = 0;
 
+    // Offscreen static graph buffer
+    let staticCanvas, staticCtx;
+
+    // --- Load and parse CSV data ---
     async function loadRockData() {
-        const response = await fetch('WLC_MUD_LOG_INTERPOLATED.csv');
+        const response = await fetch(INPUT);
         const csvText = await response.text();
-        const parsed = Papa.parse(csvText, {header: true, dynamicTyping: true}).data;
-        startDepth = parseFloat(parsed[0]['Unnamed: 0']) || 0;
+        const parsed = Papa.parse(csvText, { header: true, dynamicTyping: true }).data;
+        startDepth = parseFloat(parsed[0][DEPTHCOL]) || 0;
         parsed.forEach(row => {
-            const depth = parseFloat(row['Unnamed: 0']);
-            const gr = parseFloat(row['GR']);
-            if (isFinite(depth) && isFinite(gr)) {
+            const depth = parseFloat(row[DEPTHCOL]);
+            const val = parseFloat(row[TARGET]);
+            if (isFinite(depth) && isFinite(val)) {
                 depthData.push(depth - startDepth);
-                rockData.push(gr);
+                rockData.push(val);
             }
         });
 
-        // Load pre-computed predictions for depth + 50 m
-        const predResp = await fetch('predictions_50m.csv');
+        const predResp = await fetch('predictions_50m2.csv');
         const predText = await predResp.text();
-        const predParsed = Papa.parse(predText, {header: true, dynamicTyping: true}).data;
+        const predParsed = Papa.parse(predText, { header: true, dynamicTyping: true }).data;
         const predMap = new Map();
         predParsed.forEach(row => {
-            const d = parseFloat(row['Depth']);
-            const p = parseFloat(row['Predicted_GR']);
+            const d = parseFloat(row[DEPTHCOL]);
+            const p = parseFloat(row['pred_50m']);
             if (isFinite(d) && isFinite(p)) {
                 predMap.set(d - startDepth, p);
             }
         });
         depthData.forEach(d => {
-            const val = predMap.get(d);
-            predictedData.push(val !== undefined ? val : null);
+            const p = predMap.get(d);
+            predictedData.push(p !== undefined ? p : null);
         });
 
         MAX_DEPTH = depthData[depthData.length - 1];
         MAX_GRAPH_DEPTH = MAX_DEPTH + LOOKAHEAD_DISTANCE;
-        const allDensities = rockData.concat(predictedData.filter(v => v !== null));
-        minDensity = Math.min(...allDensities) - 5;
-        maxDensity = Math.max(...allDensities) + 5;
+        const allVals = rockData.concat(predictedData.filter(v => v !== null));
+        minVal = Math.min(...allVals) - 5;
+        maxVal = Math.max(...allVals) + 5;
     }
 
-    function predictDensity(depth) {
-        const idx = findIndexForDepth(depth);
-        const pred = predictedData[idx];
-        if (pred === null || pred === undefined) {
-            return getActualDensity(depth);
-        }
-        return pred;
-    }
-
+    // --- Utility Functions ---
     function findIndexForDepth(depth) {
         let low = 0, high = depthData.length - 1;
         while (low < high) {
@@ -206,213 +208,151 @@
         return low;
     }
 
-    function getActualDensity(depth) {
+    function predictValue(depth) {
         const idx = findIndexForDepth(depth);
-        return rockData[idx] || BASE_DENSITY;
+        const pred = predictedData[idx];
+        return (pred === null || pred === undefined)
+            ? rockData[idx]
+            : pred;
     }
 
+    // --- Pre-build static graph ---
+    function buildStaticGraph() {
+        staticCanvas = document.createElement('canvas');
+        staticCanvas.width = graphCanvas.width;
+        staticCanvas.height = graphCanvas.height;
+        staticCtx = staticCanvas.getContext('2d');
 
-    // --- 2. DRAWING & VISUALIZATION ---
+        const pad = 45;
+        const w = graphCanvas.width - pad * 2;
+        const h = graphCanvas.height - pad * 2;
+        const mapX = d => pad + (d / MAX_GRAPH_DEPTH) * w;
+        const mapY = v => pad + h - ((v - minVal) / (maxVal - minVal)) * h;
+
+        // Axes and grid
+        staticCtx.strokeStyle = '#ccc';
+        staticCtx.fillStyle = '#333';
+        staticCtx.font = '12px Arial';
+        staticCtx.textAlign = 'right';
+        for (let i = 0; i <= 5; i++) {
+            const v = minVal + (i / 5) * (maxVal - minVal);
+            const y = mapY(v);
+            staticCtx.fillText(v.toFixed(0), pad - 5, y + 4);
+            staticCtx.beginPath();
+            staticCtx.moveTo(pad, y);
+            staticCtx.lineTo(pad + w, y);
+            staticCtx.stroke();
+        }
+        staticCtx.textAlign = 'center';
+        for (let i = 0; i <= 6; i++) {
+            const d = (i / 6) * MAX_GRAPH_DEPTH;
+            const x = mapX(d);
+            staticCtx.fillText(d.toFixed(0), x, pad + h + 15);
+        }
+        staticCtx.fillText('Depth (m)', pad + w / 2, graphCanvas.height - 5);
+
+        // Legend
+        staticCtx.fillStyle = '#007bff'; staticCtx.fillRect(pad, 5, 10, 10);
+        staticCtx.fillStyle = '#333'; staticCtx.textAlign = 'left';
+        staticCtx.fillText(`Actual ${TARGET}`, pad + 15, 14);
+        staticCtx.fillStyle = '#28a745'; staticCtx.fillRect(pad + 120, 5, 10, 10);
+        staticCtx.fillStyle = '#333';
+        staticCtx.fillText(`Predicted ${TARGET}`, pad + 135, 14);
+
+        // Actual curve
+        staticCtx.strokeStyle = '#007bff'; staticCtx.lineWidth = 2;
+        staticCtx.beginPath();
+        staticCtx.moveTo(mapX(depthData[0]), mapY(rockData[0]));
+        for (let i = 1; i < depthData.length; i++) {
+            staticCtx.lineTo(mapX(depthData[i]), mapY(rockData[i]));
+        }
+        staticCtx.stroke();
+
+        // Predicted curve
+        staticCtx.strokeStyle = '#28a745'; staticCtx.beginPath();
+        let started = false;
+        for (let i = 0; i < depthData.length; i++) {
+            const p = predictedData[i];
+            if (p == null) continue;
+            const x = mapX(depthData[i] + LOOKAHEAD_DISTANCE);
+            const y = mapY(p);
+            if (!started) { staticCtx.moveTo(x, y); started = true; } else { staticCtx.lineTo(x, y); }
+        }
+        if (started) staticCtx.stroke();
+        staticCtx.lineWidth = 1;
+    }
+
+    // --- Drawing Functions ---
+    function drawInfoArrow(ctx, w, y, text, color) {
+        ctx.strokeStyle = color; ctx.fillStyle = color;
+        ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
+        const textX = (w / 2) + 20;
+        const endX = textX - 5;
+        const startX = endX - 20;
+        ctx.fillText(text, textX, y + 4);
+        ctx.beginPath();
+        ctx.moveTo(startX, y); ctx.lineTo(endX, y);
+        ctx.moveTo(endX, y); ctx.lineTo(endX - 6, y - 4);
+        ctx.moveTo(endX, y); ctx.lineTo(endX - 6, y + 4);
+        ctx.stroke();
+    }
 
     function drawWellbore() {
         wellboreCtx.clearRect(0, 0, wellboreCanvas.width, wellboreCanvas.height);
         const holeY = (currentDepth / MAX_DEPTH) * wellboreCanvas.height;
-        const wellboreCenterX = wellboreCanvas.width / 2;
-        wellboreCtx.fillStyle = '#3a352d';
-        wellboreCtx.fillRect(wellboreCenterX - 11, 0, 22, holeY);
-        
-        particles.forEach(p => {
-            p.x += p.vx; p.y += p.vy; p.lifespan--;
-            wellboreCtx.fillStyle = p.color; wellboreCtx.globalAlpha = p.lifespan / 50;
-            wellboreCtx.fillRect(p.x, p.y, p.size, p.size);
-        });
-        wellboreCtx.globalAlpha = 1.0;
-        particles = particles.filter(p => p.lifespan > 0);
-        
-        wellboreCtx.fillStyle = '#555';
-        wellboreCtx.beginPath();
-        wellboreCtx.moveTo(wellboreCenterX - 10, holeY - 15);
-        wellboreCtx.lineTo(wellboreCenterX + 10, holeY - 15);
-        wellboreCtx.lineTo(wellboreCenterX, holeY);
-        wellboreCtx.closePath();
-        wellboreCtx.fill();
-        
-        const actualDensity = getActualDensity(currentDepth);
-        const predictedLookaheadDensity = predictDensity(currentDepth);
-        const predictionY = ((currentDepth + LOOKAHEAD_DISTANCE) / MAX_DEPTH) * wellboreCanvas.height;
-        
-        drawInfoArrow(wellboreCtx, wellboreCanvas.width, holeY, `Actual: ${actualDensity.toFixed(1)}`, '#007bff');
+        const centerX = wellboreCanvas.width / 2;
+        wellboreCtx.fillStyle = '#3a352d'; wellboreCtx.fillRect(centerX - 11, 0, 22, holeY);
+        particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.lifespan--; wellboreCtx.fillStyle = p.color; wellboreCtx.globalAlpha = p.lifespan/50; wellboreCtx.fillRect(p.x, p.y, p.size, p.size); });
+        wellboreCtx.globalAlpha = 1.0; particles = particles.filter(p => p.lifespan > 0);
+        wellboreCtx.fillStyle = '#555'; wellboreCtx.beginPath(); wellboreCtx.moveTo(centerX - 10, holeY - 15); wellboreCtx.lineTo(centerX + 10, holeY - 15); wellboreCtx.lineTo(centerX, holeY); wellboreCtx.closePath(); wellboreCtx.fill();
+        const actual = rockData[findIndexForDepth(currentDepth)];
+        const predicted = predictValue(currentDepth + LOOKAHEAD_DISTANCE);
+        drawInfoArrow(wellboreCtx, wellboreCanvas.width, holeY, `Actual ${TARGET}: ${actual.toFixed(1)}`, '#007bff');
         if (currentDepth + LOOKAHEAD_DISTANCE <= MAX_DEPTH) {
-            drawInfoArrow(wellboreCtx, wellboreCanvas.width, predictionY, `Predicted: ${predictedLookaheadDensity.toFixed(1)}`, '#28a745');
+            const py = ((currentDepth + LOOKAHEAD_DISTANCE)/MAX_DEPTH)*wellboreCanvas.height;
+            drawInfoArrow(wellboreCtx, wellboreCanvas.width, py, `Predicted ${TARGET}: ${predicted.toFixed(1)}`, '#28a745');
         }
     }
-    
-    function drawInfoArrow(ctx, canvasWidth, y, text, color) {
-        ctx.strokeStyle = color; ctx.fillStyle = color;
-        ctx.font = 'bold 13px Arial'; ctx.textAlign = 'left';
-        const textX = (canvasWidth / 2) + 20;
-        const arrowEndX = textX - 5;
-        const arrowStartX = arrowEndX - 20;
-        ctx.fillText(text, textX, y + 4);
-        ctx.beginPath();
-        ctx.moveTo(arrowStartX, y); ctx.lineTo(arrowEndX, y);
-        ctx.moveTo(arrowEndX, y); ctx.lineTo(arrowEndX - 6, y - 4);
-        ctx.moveTo(arrowEndX, y); ctx.lineTo(arrowEndX - 6, y + 4);
-        ctx.stroke();
-    }
-    
-    // ----- GRAPH DRAWING (MODIFIED) -----
+
     function drawGraph() {
         graphCtx.clearRect(0, 0, graphCanvas.width, graphCanvas.height);
-        
-        const padding = 45;
-        const chartWidth = graphCanvas.width - padding * 2;
-        const chartHeight = graphCanvas.height - padding * 2;
-        
-        // MODIFIED: mapDepthToX now uses MAX_GRAPH_DEPTH for its scale
-        const mapDepthToX = depth => padding + (depth / MAX_GRAPH_DEPTH) * chartWidth;
-        const mapDensityToY = density => padding + chartHeight - ((density - minDensity) / (maxDensity - minDensity)) * chartHeight;
-
-        // Draw Axes and Grid
-        graphCtx.strokeStyle = '#ccc'; graphCtx.fillStyle = '#333'; graphCtx.font = '12px Arial';
-        
-        graphCtx.textAlign = 'right';
-        for (let i = 0; i <= 5; i++) {
-            const density = minDensity + (i/5) * (maxDensity - minDensity);
-            const y = mapDensityToY(density);
-            graphCtx.fillText(density.toFixed(0), padding - 5, y + 4);
-            graphCtx.beginPath(); graphCtx.moveTo(padding, y); graphCtx.lineTo(padding + chartWidth, y); graphCtx.stroke();
-        }
-        
-        graphCtx.textAlign = 'center';
-        // MODIFIED: X-axis labels now go up to MAX_GRAPH_DEPTH
-        for (let i = 0; i <= 6; i++) {
-            const depth = (i/6) * MAX_GRAPH_DEPTH;
-            const x = mapDepthToX(depth);
-            graphCtx.fillText(depth.toFixed(0), x, padding + chartHeight + 15);
-        }
-        graphCtx.fillText("Depth (m)", padding + chartWidth/2, graphCanvas.height - 5);
-        
-        graphCtx.fillStyle = '#007bff'; graphCtx.fillRect(padding, 5, 10, 10);
-        graphCtx.fillStyle = '#333'; graphCtx.textAlign = 'left';
-        graphCtx.fillText('Actual Density', padding + 15, 14);
-        graphCtx.fillStyle = '#28a745'; graphCtx.fillRect(padding + 120, 5, 10, 10);
-        graphCtx.fillStyle = '#333';
-        graphCtx.fillText('Predicted Density (at predicted depth)', padding + 135, 14);
-
-        const lastIndex = findIndexForDepth(currentDepth);
-        if (lastIndex < 1) return;
-
-        // Actual Line (drawn up to currentDepth)
-        graphCtx.strokeStyle = '#007bff'; graphCtx.lineWidth = 2;
-        graphCtx.beginPath();
-        graphCtx.moveTo(mapDepthToX(depthData[0]), mapDensityToY(rockData[0]));
-        for (let i = 1; i <= lastIndex; i++) {
-            graphCtx.lineTo(mapDepthToX(depthData[i]), mapDensityToY(rockData[i]));
-        }
-        graphCtx.stroke();
-
-        // --- MODIFIED: Predicted Line plotting logic ---
-        graphCtx.strokeStyle = '#28a745';
-        graphCtx.lineWidth = 2;
-        graphCtx.beginPath();
-        let started = false;
-        for (let i = 0; i <= lastIndex; i++) {
-            const predictedValue = predictedData[i];
-            if (predictedValue == null) continue;
-            const depthOfPrediction = depthData[i] + LOOKAHEAD_DISTANCE;
-            const x = mapDepthToX(depthOfPrediction);
-            const y = mapDensityToY(predictedValue);
-            if (!started) { graphCtx.moveTo(x, y); started = true; }
-            else { graphCtx.lineTo(x, y); }
-        }
-        if (started) graphCtx.stroke();
-
-        graphCtx.lineWidth = 1;
-    }
-    
-    function renderAll() {
-        drawWellbore();
-        drawGraph();
+        graphCtx.drawImage(staticCanvas, 0, 0);
+        const pad = 45;
+        const chartW = graphCanvas.width - pad * 2;
+        const x = pad + (currentDepth / MAX_GRAPH_DEPTH) * chartW;
+        graphCtx.strokeStyle = '#ff6600'; graphCtx.lineWidth = 1.5;
+        graphCtx.beginPath(); graphCtx.moveTo(x, pad); graphCtx.lineTo(x, graphCanvas.height - pad); graphCtx.stroke();
     }
 
-    // --- 3. SIMULATION LOGIC & EVENT HANDLING (Unchanged) ---
+    // --- Simulation & Event Handling ---
     function updateSimulation() {
         if (!isDrilling) return;
         currentDepth += DRILL_SPEED / 60;
-        if (currentDepth >= MAX_DEPTH) {
-            currentDepth = MAX_DEPTH;
-            stopDrilling();
-        }
-        const drillTipY = (currentDepth / MAX_DEPTH) * wellboreCanvas.height;
-        if (Math.random() > 0.5) { // Create particles less frequently
-            particles.push({
-                x: wellboreCanvas.width / 2, y: drillTipY,
-                vx: (Math.random() - 0.5) * 3, vy: -Math.random() * 4 - 1,
-                lifespan: Math.random() * 50 + 20, size: Math.random() * 2 + 1,
-                color: `rgba(139, 69, 19, ${Math.random() * 0.5 + 0.5})`
-            });
-        }
-        updateUI();
-        renderAll();
+        if (currentDepth >= MAX_DEPTH) { currentDepth = MAX_DEPTH; stopDrilling(); }
+        if (Math.random() > 0.5) { const y = (currentDepth / MAX_DEPTH) * wellboreCanvas.height; particles.push({ x: wellboreCanvas.width/2, y, vx: (Math.random()-0.5)*3, vy: -Math.random()*4-1, lifespan: Math.random()*50+20, size: Math.random()*2+1, color: `rgba(139,69,19,${Math.random()*0.5+0.5})` }); }
+        depthSlider.value = currentDepth; infoDisplay.textContent = `Current Depth: ${currentDepth.toFixed(1)} m`;
+        drawWellbore(); drawGraph();
         animationFrameId = requestAnimationFrame(updateSimulation);
     }
 
-    function startDrilling() {
-        if (isDrilling) return;
-        isDrilling = true; playPauseBtn.textContent = 'Pause';
-        animationFrameId = requestAnimationFrame(updateSimulation);
-    }
+    function startDrilling() { isDrilling = true; playPauseBtn.textContent = 'Pause'; animationFrameId = requestAnimationFrame(updateSimulation); }
+    function stopDrilling() { isDrilling = false; playPauseBtn.textContent = 'Play'; cancelAnimationFrame(animationFrameId); }
 
-    function stopDrilling() {
-        if (!isDrilling) return;
-        isDrilling = false; playPauseBtn.textContent = 'Play';
-        cancelAnimationFrame(animationFrameId);
-    }
-
-    function updateUI() {
-        depthSlider.value = currentDepth;
-        infoDisplay.textContent = `Current Depth: ${currentDepth.toFixed(1)} m`;
-    }
-
-    function resizeCanvases() {
-        const wellboreContainer = document.getElementById('wellbore-container');
-        const graphContainer = document.getElementById('graph-container');
-        wellboreCanvas.width = wellboreContainer.clientWidth - 24;
-        wellboreCanvas.height = wellboreContainer.clientHeight - 40;
-        graphCanvas.width = graphContainer.clientWidth - 24;
-        graphCanvas.height = graphContainer.clientHeight - 40;
-        renderAll();
-    }
-
-    // --- Event Listeners ---
-    playPauseBtn.addEventListener('click', () => {
-        if (isDrilling) {
-            stopDrilling();
-        } else {
-            if (currentDepth >= MAX_DEPTH) {
-                currentDepth = 0; particles = [];
-            }
-            startDrilling();
-        }
-    });
-    depthSlider.addEventListener('input', () => {
-        stopDrilling();
-        currentDepth = parseFloat(depthSlider.value);
-        updateUI();
-        renderAll();
-    });
-    window.addEventListener('resize', resizeCanvases);
+    playPauseBtn.addEventListener('click', () => { if (isDrilling) stopDrilling(); else { if (currentDepth >= MAX_DEPTH) { currentDepth = 0; particles = []; } startDrilling(); }});
+    depthSlider.addEventListener('input', () => { stopDrilling(); currentDepth = parseFloat(depthSlider.value); infoDisplay.textContent = `Current Depth: ${currentDepth.toFixed(1)} m`; drawWellbore(); drawGraph(); });
+    window.addEventListener('resize', () => { const wc=document.getElementById('wellbore-container'), gc=document.getElementById('graph-container'); wellboreCanvas.width=wc.clientWidth-24; wellboreCanvas.height=wc.clientHeight-40; graphCanvas.width=gc.clientWidth-24; graphCanvas.height=gc.clientHeight-40; buildStaticGraph(); drawWellbore(); drawGraph(); });
 
     // --- Initialization ---
     async function init() {
+        graphTitle.textContent = `${TARGET} vs Depth`;
         await loadRockData();
         depthSlider.max = MAX_DEPTH;
-        resizeCanvases();
-        updateUI();
-        console.log("Drilling simulation with predictive graph initialized.");
+        const wc=document.getElementById('wellbore-container'), gc=document.getElementById('graph-container');
+        wellboreCanvas.width=wc.clientWidth-24; wellboreCanvas.height=wc.clientHeight-40;
+        graphCanvas.width=gc.clientWidth-24; graphCanvas.height=gc.clientHeight-40;
+        buildStaticGraph();
+        drawWellbore(); drawGraph();
     }
-
     init();
 </script>
 </body>

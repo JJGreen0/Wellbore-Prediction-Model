@@ -15,7 +15,7 @@ from tqdm import tqdm  # <— Import tqdm
 # ─── USER‐CONFIGURABLE SETTINGS ───────────────────────────────────────────────
 
 # 1) Which column in your DataFrame holds the depth values?
-DEPTH_COL = 'Unnamed: 0'
+DEPTH_COL = 'DVER'
 
 # 2) Which columns should be used as “input features”? 
 FEATURE_COLS = ['GR', 'ROP', 'DVER', 'ROPA', 'HKLA', 'TQA', 'SPPA', 'HSX']
