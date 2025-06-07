@@ -148,11 +148,13 @@
     let predictedData = [];
     let minDensity, maxDensity;
     let currentDepth = 0;
+    let trailDepth = 0;
     let isDrilling = false;
     let animationFrameId;
     let particles = [];
     let depthData = [];
     let startDepth = 0;
+    let dirtPattern;
 
     async function loadRockData() {
         const response = await fetch(INPUT);
@@ -211,7 +213,11 @@
 
     function drawWellbore() {
         wellboreCtx.clearRect(0, 0, wellboreCanvas.width, wellboreCanvas.height);
-        const holeY = (currentDepth / MAX_DEPTH) * wellboreCanvas.height;
+        wellboreCtx.fillStyle = dirtPattern;
+        wellboreCtx.fillRect(0, 0, wellboreCanvas.width, wellboreCanvas.height);
+        drawDepthScale();
+        const holeY = (trailDepth / MAX_DEPTH) * wellboreCanvas.height;
+        const drillY = (currentDepth / MAX_DEPTH) * wellboreCanvas.height;
         const centerX = wellboreCanvas.width / 2;
         wellboreCtx.fillStyle = '#3a352d';
         wellboreCtx.fillRect(centerX - 11, 0, 22, holeY);
@@ -227,15 +233,15 @@
 
         wellboreCtx.fillStyle = '#555';
         wellboreCtx.beginPath();
-        wellboreCtx.moveTo(centerX - 10, holeY - 15);
-        wellboreCtx.lineTo(centerX + 10, holeY - 15);
-        wellboreCtx.lineTo(centerX, holeY);
+        wellboreCtx.moveTo(centerX - 10, drillY - 15);
+        wellboreCtx.lineTo(centerX + 10, drillY - 15);
+        wellboreCtx.lineTo(centerX, drillY);
         wellboreCtx.closePath();
         wellboreCtx.fill();
 
         const actual = rockData[findIndexForDepth(currentDepth)];
         const predicted = predictValue(currentDepth + LOOKAHEAD_DISTANCE);
-        drawInfoArrow(wellboreCtx, wellboreCanvas.width, holeY, `Actual ${TARGET}: ${actual.toFixed(1)}`, '#007bff');
+        drawInfoArrow(wellboreCtx, wellboreCanvas.width, drillY, `Actual ${TARGET}: ${actual.toFixed(1)}`, '#007bff');
         if (currentDepth + LOOKAHEAD_DISTANCE <= MAX_DEPTH) {
             const predY = ((currentDepth + LOOKAHEAD_DISTANCE) / MAX_DEPTH) * wellboreCanvas.height;
             drawInfoArrow(wellboreCtx, wellboreCanvas.width, predY, `Predicted ${TARGET}: ${predicted.toFixed(1)}`, '#28a745');
@@ -257,6 +263,26 @@
         ctx.moveTo(endX, y);
         ctx.lineTo(endX - 6, y + 4);
         ctx.stroke();
+    }
+
+    function drawDepthScale() {
+        const tick = 100;
+        wellboreCtx.strokeStyle = '#333';
+        wellboreCtx.fillStyle = '#333';
+        wellboreCtx.font = '10px Arial';
+        wellboreCtx.textAlign = 'right';
+        for (let d = 0; d <= MAX_DEPTH; d += tick) {
+            const y = (d / MAX_DEPTH) * wellboreCanvas.height;
+            wellboreCtx.beginPath();
+            wellboreCtx.moveTo(30, y);
+            wellboreCtx.lineTo(35, y);
+            wellboreCtx.stroke();
+            wellboreCtx.fillText(d.toString(), 28, y + 3);
+        }
+        wellboreCtx.beginPath();
+        wellboreCtx.moveTo(35, 0);
+        wellboreCtx.lineTo(35, wellboreCanvas.height);
+        wellboreCtx.stroke();
     }
 
     function drawGraph() {
@@ -327,11 +353,29 @@
 
     function renderAll() { drawWellbore(); drawGraph(); }
 
+    function createDirtPattern() {
+        const c = document.createElement('canvas');
+        c.width = 20; c.height = 20;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#e8dcc5';
+        ctx.fillRect(0,0,20,20);
+        for (let i=0;i<30;i++) {
+            const x=Math.random()*20, y=Math.random()*20, s=Math.random()*3;
+            ctx.fillStyle = 'rgba(0,0,0,0.05)';
+            ctx.fillRect(x,y,s,s);
+        }
+        dirtPattern = wellboreCtx.createPattern(c, 'repeat');
+    }
+
     function updateSimulation() {
         if (!isDrilling) return;
         currentDepth += DRILL_SPEED/60;
         if (currentDepth >= MAX_DEPTH) {
             currentDepth = MAX_DEPTH; stopDrilling();
+        }
+        if (trailDepth < currentDepth) {
+            trailDepth += (DRILL_SPEED/60) * 0.8;
+            if (trailDepth > currentDepth) trailDepth = currentDepth;
         }
         if (Math.random()>0.5) {
             const y=(currentDepth/MAX_DEPTH)*wellboreCanvas.height;
@@ -345,12 +389,15 @@
 
     playPauseBtn.addEventListener('click', () => {
         if (isDrilling) stopDrilling();
-        else { if (currentDepth>=MAX_DEPTH) {currentDepth=0; particles=[];} startDrilling(); }
+        else {
+            if (currentDepth>=MAX_DEPTH) {currentDepth=0; trailDepth=0; particles=[];}
+            startDrilling();
+        }
     });
     depthSlider.addEventListener('input', () => { stopDrilling(); currentDepth=parseFloat(depthSlider.value); updateUI(); renderAll(); });
     window.addEventListener('resize', resizeCanvases);
 
-    function startDrilling() { isDrilling=true; playPauseBtn.textContent='Pause'; animationFrameId=requestAnimationFrame(updateSimulation); }
+    function startDrilling() { isDrilling=true; trailDepth=currentDepth; playPauseBtn.textContent='Pause'; animationFrameId=requestAnimationFrame(updateSimulation); }
     function stopDrilling() { isDrilling=false; playPauseBtn.textContent='Play'; cancelAnimationFrame(animationFrameId); }
     function resizeCanvases() {
         const wc=document.getElementById('wellbore-container'), gc=document.getElementById('graph-container');
@@ -363,6 +410,7 @@
     async function init() {
         graphTitle.textContent = `${TARGET} vs Depth`;
         await loadRockData();
+        createDirtPattern();
         depthSlider.max = MAX_DEPTH;
         resizeCanvases();
         updateUI();
